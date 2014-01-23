@@ -1,0 +1,230 @@
+#! /usr/bin/python
+
+import sys
+import random
+
+"""
+[x]Q:Not sure why binders and nonbinders were treated separately.
+    A: For those borderline cases where two peptides are separted into binder and nonbinder, these were kept in SimilarityReduced.
+
+# Should allow care where there are two similar peptides, but one is a binder but the other is non-binder.
+# This can come about due to one residue mutation.
+[] Given a list of peptide sequences, return a subset such that there are no similar peptides in the set.
+INPUT: bindingdata: for each (mhc,length): peptides, their binding aff measurements.
+OUTPUT: bindingdata a subset: such that no two peptides are similar.
+"""
+
+#sys.path.append('./src')
+from cvpart.util.bdata.bdobject import BindingData, get_bdata_cv_random
+
+aa_list = 'ACDEFGHIKLMNPQRSTVWY'
+affinity_cutoff = 500.00 # in IC50 (nM) binder < affinity_cutoff
+sim_cutoff = 0.80
+
+from util_similarity import *
+from util_similarity import get_d_bindingdata
+
+#TODO move to routine that does sequence similarity reduction.
+def reduce_seq(peptide_list, d_count_neighbour, debug=False):
+    """
+    Returns a subset of peptide_i sequences such that there are no two **similar** peptides.
+    ALGORITHM: 
+        Sort peptides based on sizes of each peptides neighbours, from small to large.
+        Starting from peptide_i with smallest number of neighbour, see if this peptide_i is similar to any in the list [forward_seq].
+        If not, then add this peptide_i to the list. Else, skip to next peptide_i.
+    Q: Why add peptide with smallest number of neighbours?
+    A: If you add peptide with the largest num of neighbours, then you are already elimiating this largest set of peptides from your final set.
+    
+    """
+    temp_seq    = []
+    ref_seq     = []
+    sorted_seq  = []
+    forward_seq = []
+    for peptide_i in peptide_list:
+        temp_seq.append(peptide_i)
+        ref_seq.append(peptide_i)
+    sorted_list = sorted(d_count_neighbour.iteritems(), key=lambda (k,count):(count,k))
+    sorted_seq = [kseq for (kseq,count) in sorted_list]
+
+    forward_seq.append(sorted_seq[0])
+    for peptide_i in sorted_seq:
+        match = -1
+        for peptide_j in forward_seq:
+            if (is_similar(peptide_i,peptide_j) == True):
+                match = 1
+                break;
+        if match == -1:
+            forward_seq.append(peptide_i)
+    is_error = check_seq_list(forward_seq); assert is_error == False
+    return forward_seq
+
+def get_peptide_list_reduced(peptide_list, debug = False):
+    """
+    Returns a list of peptide_list_sr such that no two **similar** peptides.
+    ALGORITHM: 
+    """
+    d_count_neighbour = count_neighbour(peptide_list)
+    peptide_list_reduced = []
+    if len(peptide_list) > 0: peptide_list_reduced = reduce_seq(peptide_list, d_count_neighbour)
+    return peptide_list_reduced
+
+def filter_bd(data_bd, peptide_list_reduced):
+    """
+    Return only those entries whose peptides are in the given list of peptides.
+    """
+    index_peptide = 4  # This index should not change.
+    filter_sr = lambda x: x[index_peptide].strip() in peptide_list_reduced
+    data_sr = filter(filter_sr, data_bd)
+    return data_sr
+
+def generate_data_similarity_reduced_simple(data_bd, data_bd_binder, data_bd_nonbinder, debug=False):
+    """
+    This version applies reduce_seq only once to all peptides.
+    """
+    dic_data           = get_dic_bindingdata(data_bd)
+    peptide_list       = dic_data.keys()
+    peptide_list_sr    = get_peptide_list_reduced(peptide_list, debug=False)
+
+    data_bd_sr = filter_bd(data_bd, peptide_list_sr)
+    return data_bd_sr
+
+def get_peptide_meas(row):
+    """
+    Utility routine.
+    """
+    peptide = row[4].strip()
+    meas    = float(row[6])  # Should be in units of IC50 nM
+    return (peptide, meas)
+
+def get_remaining_peptides(remaining_peptide_list, dic_data, data_sr_combined, debug=False):
+    """
+    This handles those cases where a peptide from the remaining list of peptides introduces novelty.
+       That is, all of its similar pepties are nonbinders, yet the peptide is a nonbinder, then it is added.
+       Similarly for binders.
+    """
+    data_sr_remainder = []
+    for i in remaining_peptide_list:
+        b_count  = 0  # binder count
+        nb_count = 0
+        rowi = dic_data[i]
+        (peptide_i, meas_i) = get_peptide_meas(rowi)
+        for rowj in data_sr_combined:
+            (peptide_j, meas_j) = get_peptide_meas(rowj)
+            if (is_similar(peptide_i,peptide_j)==True) and (peptide_i != peptide_j):
+                if meas_j >= affinity_cutoff:
+                    nb_count += 1
+                else:
+                    b_count += 1
+        if ((b_count == 0) and (meas_i < affinity_cutoff)) or ((nb_count == 0) and (meas_i >= affinity_cutoff)):
+            data_sr_remainder.append(rowi)
+        if debug==True: print i, peptide_i, b_count, nb_count, meas_i
+    return data_sr_remainder
+
+def generate_data_similarity_reduced(data_bd, data_bd_binder, data_bd_nonbinder, debug=False):
+    """
+    This version applies reduce_seq separately to binder and nonbinder.
+    ALGORITHM: 
+    """
+    dic_data           = get_d_bindingdata(data_bd)         # Returns d[peptide] = (species, sequence, ic50, ...)
+    dic_data_binder    = get_d_bindingdata(data_bd_binder)
+    dic_data_nonbinder = get_d_bindingdata(data_bd_nonbinder)
+
+    remaining_peptide_list = dic_data.keys()
+    peptide_list           = dic_data.keys()
+    peptide_list_binder    = dic_data_binder.keys()
+    peptide_list_nonbinder = dic_data_nonbinder.keys()
+
+    plist_binder_sr    = get_peptide_list_reduced(peptide_list_binder,    debug=False)
+    plist_nonbinder_sr = get_peptide_list_reduced(peptide_list_nonbinder, debug=False)
+    [remaining_peptide_list.remove(p) for p in plist_binder_sr]
+    [remaining_peptide_list.remove(p) for p in plist_nonbinder_sr]
+
+    data_sr_binder    = filter_bd(data_bd_binder,    plist_binder_sr)
+    data_sr_nonbinder = filter_bd(data_bd_nonbinder, plist_nonbinder_sr)
+    data_sr_combined  = data_sr_binder + data_sr_nonbinder
+    data_sr_remainder = get_remaining_peptides(remaining_peptide_list, dic_data, data_sr_combined)
+
+    data_bd_sr = data_sr_combined + data_sr_remainder
+    if len(data_sr_remainder)>0: print 'len(data_sr_combined), len(data_sr_remainder)', len(data_sr_combined), len(data_sr_remainder), len(remaining_peptide_list)
+    if debug==True: print 'len(data_sr_combined), len(data_sr_remainder)', len(data_sr_combined), len(data_sr_remainder), len(remaining_peptide_list)
+
+    plist = [r[4] for r in data_bd_sr]
+    dic_count_temp = count_neighbour(plist)
+    sorted_list_temp = sorted(dic_count_temp.iteritems(), key=lambda (k,v):(v,k))
+    if debug==True: print 'debug ', sorted_list_temp[-20:-1]
+    if debug==True: print 'len(peptide_list), len(peptide_list_reduced)', len(peptide_list_binder), len(plist_binder_sr)
+    is_error = check_seq_list(plist)
+    if debug==True: print 'is_error ', is_error
+
+    return data_bd_sr
+
+def check_single_dataset(data_bd, data_bd_sr, data_bd_sr_simple):
+    """
+    data_bd_sr may have homologous peptides only for those cases when one peptide is a binder while the other is a nonbinder.
+    """
+    #mhckey = 'Patr-A-0901-11'
+    # checking
+    plist_ref = [get_peptide_meas(r)[0] for r in data_bd]
+    plist_a   = [get_peptide_meas(r)[0] for r in data_bd_sr]
+    plist_a_temp   = [get_peptide_meas(r) for r in data_bd_sr]
+
+    plist_b   = [get_peptide_meas(r)[0] for r in data_bd_sr_simple]
+    plist_diff = list(set(plist_a).difference(set(plist_b)))
+    is_error_a = check_seq_list(plist_a); #assert is_error_a == False
+    is_error_b = check_seq_list(plist_b); #assert is_error_b == False
+    if len(plist_diff)>0:
+        peptide_t = plist_diff[0]
+        index_peptide  = plist_a.index(peptide_t)
+        dic_count = count_neighbour(plist_ref)
+        plist_filtered = [(peptide,meas) for (peptide,meas) in plist_a_temp if is_homologous(peptide,peptide_t)==True]
+
+        print 'debug: peptide of interest', peptide_t, dic_count[peptide_t]
+        print 'debug: is_error_sr, is_error_sr_simple', is_error_a, is_error_b
+        print 'debug: A list of homologous peptides:',  plist_filtered
+        print 'debug', plist_diff, peptide_t in plist_a, peptide_t in plist_b
+
+
+
+def generate_bdobject_similarity_reduced(bd, debug=False):
+    """
+    Loops over a list of mhckey. For each mhckey, return binders and nonbinders.
+    """
+
+    bd_sr  = BindingData()
+    klist  = bd.keys()
+
+    #header = ['(MHC,length)', 'Original', 'SR-all', 'SR']
+    header = ['(MHC,length)', 'Original', 'SR']
+    if debug==True: print '\t'.join(header)
+
+    #mhckey = 'HLA-A-0101-9'
+    #mhckey = 'H-2-Dd-9'
+    mhckey = 'Patr-A-0901-11'
+
+    for mhckey in klist:
+    #for mhckey in [mhckey]:
+        data_bd           = bd.get(mhckey) # ['human', 'HLA-A-0101', '9', 'TBD', 'YYYNFSEDL', '>', '20000.0']\
+        data_bd_binder    = bd.get_binders(mhckey)
+        data_bd_nonbinder = bd.get_nonbinders(mhckey)
+
+        data_bd_sr        = generate_data_similarity_reduced(data_bd, data_bd_binder, data_bd_nonbinder)
+
+        #data_bd_sr_simple = generate_data_similarity_reduced_simple(data_bd,data_bd_binder,data_bd_nonbinder)
+        bd_sr.set(mhckey, data_bd_sr)
+
+        #check_single_dataset(data_bd, data_bd_sr, data_bd_sr_simple)
+        #print '\t'.join(map(str,[mhckey, len(data_bd), len(data_bd_sr_simple), len(data_bd_sr)]))
+        if debug==True: print '\t'.join(map(str,[mhckey, len(data_bd), len(data_bd_sr)]))
+    return bd_sr
+
+
+def main():
+    """
+    """
+
+    
+    pass
+
+
+if __name__ == '__main__':
+    main()
